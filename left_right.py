@@ -1,4 +1,5 @@
 import os
+import joblib
 import warnings
 import numpy as np
 import matplotlib.pyplot as plt
@@ -569,6 +570,23 @@ for fname in ['fig_preprocesamiento_otsu.png', 'fig_hog_orientaciones.png',
     print(f"   • {fname}")
 print("\n" + "═"*55)
 
+# ── Guardar modelo ────────────────────────────────────────────
+modelo_exportado = {
+    'pipeline'   : best_pipe,       # StandardScaler + LogisticRegression
+    'hog_params' : HOG_PARAMS,      # parámetros HOG usados en entrenamiento
+    'img_size'   : IMG_SIZE,        # tamaño de imagen esperado
+    'clases'     : {0: 'Izquierda', 1: 'Derecha'},
+    'metricas'   : {
+        'accuracy' : round(acc,  4),
+        'f1'       : round(f1,   4),
+        'roc_auc'  : round(roc_auc, 4),
+    }
+}
+ 
+joblib.dump(modelo_exportado, 'modelo_flechas.joblib', compress=3)
+print("\n Modelo exportado → modelo_flechas.joblib")
+print(f"   Tamaño: {os.path.getsize('modelo_flechas.joblib') / 1024:.1f} KB")
+print(f"   Accuracy guardada: {acc:.4f}  |  F1: {f1:.4f}")
 
 # ══════════════════════════════════════════════════════════════
 # 7. FUNCIÓN DE PREDICCIÓN
