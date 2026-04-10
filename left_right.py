@@ -3,629 +3,618 @@ import warnings
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
-from matplotlib.colors import ListedColormap
 from PIL import Image
 
-from sklearn.linear_model  import LogisticRegression
-from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
-from sklearn.metrics        import (confusion_matrix, accuracy_score, precision_score,
-                                    recall_score, f1_score, roc_curve, auc,
-                                    ConfusionMatrixDisplay)
-from sklearn.preprocessing  import StandardScaler
-from sklearn.decomposition  import PCA
+from skimage.filters   import threshold_otsu
+from skimage.feature   import hog
+from skimage           import morphology, exposure
+
+from sklearn.linear_model    import LogisticRegression
+from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score, GridSearchCV
+from sklearn.metrics         import (confusion_matrix, accuracy_score, precision_score,
+                                     recall_score, f1_score, roc_curve, auc,
+                                     ConfusionMatrixDisplay)
+from sklearn.preprocessing   import StandardScaler
+from sklearn.decomposition   import PCA
+from sklearn.pipeline        import Pipeline
 
 warnings.filterwarnings('ignore')
 np.random.seed(42)
 
-# Paleta de colores
+# ── Paleta ────────────────────────────────────────────────────
+BLUE   = '#1f77b4'
 DARK   = '#003B4A'
 ORANGE = '#E07C24'
 GREEN  = '#2E8B57'
 GRAY   = '#6E6E6E'
 RED    = '#C0392B'
-LIGHT  = '#E8F6F9'
 PURPLE = '#7B2D8B'
-BLUE   = '#1f77b4'
 
 plt.rcParams.update({
-    'font.family'        : 'sans-serif',
-    'font.size'          : 9,
-    'axes.titlesize'     : 11,
-    'axes.titleweight'   : 'bold',
-    'axes.labelsize'     : 9,
-    'axes.spines.top'    : False,
-    'axes.spines.right'  : False,
-    'figure.facecolor'   : 'white',
-    'figure.dpi'         : 120,
+    'font.family'      : 'sans-serif',  'font.size'        : 9,
+    'axes.titlesize'   : 11,            'axes.titleweight'  : 'bold',
+    'axes.labelsize'   : 9,             'axes.spines.top'   : False,
+    'axes.spines.right': False,         'figure.facecolor'  : 'white',
+    'figure.dpi'       : 120,
 })
 
 def stitle(fig, t, s=''):
     fig.suptitle(t, fontsize=13, fontweight='bold', color=DARK, y=0.99)
-    if s:
-        fig.text(0.5, 0.95, s, ha='center', fontsize=9, color=GRAY)
+    if s: fig.text(0.5, 0.95, s, ha='center', fontsize=9, color=GRAY)
 
-print("Librerías cargadas correctamente.")
 
-IMG_SIZE    = 64       # píxeles × píxeles de normalización
-BASE_DIR = 'dataset'
+# ══════════════════════════════════════════════════════════════
+# PARÁMETROS
+# ══════════════════════════════════════════════════════════════
+IMG_SIZE  = 64
+BASE_DIR  = 'dataset'
 DIR_LEFT  = os.path.join(BASE_DIR, 'Left')
 DIR_RIGHT = os.path.join(BASE_DIR, 'Right')
-VALID_EXT   = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp', '.tif'}
+VALID_EXT = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif', '.webp'}
 
-def load_folder(folder_path: str, label: int) -> tuple:
-    """
-    Carga todas las imágenes de una carpeta como arrays numpy
-    normalizados en escala de grises.
+# HOG: con IMG_SIZE=64, pixels_per_cell=8 → 8×8 celdas → 8×8×4×9 = 2304 features
+HOG_PARAMS = dict(
+    orientations    = 9,
+    pixels_per_cell = (8, 8),
+    cells_per_block = (2, 2),
+    block_norm      = 'L2-Hys',
+    visualize       = True,
+)
 
-    Returns
-    -------
-    images : list of ndarray  (IMG_SIZE, IMG_SIZE) float32 ∈ [0,1]
-    labels : list of int
-    names  : list of str
-    """
+
+# ══════════════════════════════════════════════════════════════
+# 1. CARGA
+# ══════════════════════════════════════════════════════════════
+def load_folder(folder_path, label):
     images, labels, names = [], [], []
     if not os.path.isdir(folder_path):
         raise FileNotFoundError(
-            f"No se encontró la carpeta '{folder_path}'.\n"
-            f"   Asegúrate de ejecutar este script desde la carpeta del proyecto.")
-    
+            f"\n Carpeta '{folder_path}' no encontrada."
+            f"\n    Ejecuta desde la carpeta que contiene dataset/")
     files = sorted(f for f in os.listdir(folder_path)
                    if os.path.splitext(f)[1].lower() in VALID_EXT)
-    
     if not files:
-        raise ValueError(f"No hay imágenes válidas en '{folder_path}'.")
-    
+        raise ValueError(f" No hay imágenes en '{folder_path}'.")
     for fname in files:
         path = os.path.join(folder_path, fname)
         try:
             img = (Image.open(path)
-                   .convert('L')                              # escala de grises
+                   .convert('L')
                    .resize((IMG_SIZE, IMG_SIZE), Image.LANCZOS))
-            arr = np.array(img, dtype=np.float32) / 255.0    # normalizar a [0,1]
-            images.append(arr)
-            labels.append(label)
-            names.append(fname)
+            arr = np.array(img, dtype=np.float32) / 255.0
+            images.append(arr); labels.append(label); names.append(fname)
         except Exception as e:
-            print(f"  ⚠ No se pudo leer '{fname}': {e}")
-    
+            print(f"  ⚠  No se pudo leer '{fname}': {e}")
     return images, labels, names
 
-# Carga
+print("\n" + "═"*55)
+print("  ¿Izquierda o Derecha? v2 — Otsu + HOG + GridSearch")
+print("═"*55)
+print("\n Cargando dataset...")
+
 imgs_L, lbl_L, names_L = load_folder(DIR_LEFT,  label=0)
 imgs_R, lbl_R, names_R = load_folder(DIR_RIGHT, label=1)
 
-images_all = np.array(imgs_L + imgs_R,  dtype=np.float32)
-labels_all = np.array(lbl_L + lbl_R,   dtype=int)
+images_raw = np.array(imgs_L + imgs_R, dtype=np.float32)
+labels_all = np.array(lbl_L  + lbl_R,  dtype=int)
 names_all  = names_L + names_R
 
-n_total = len(images_all)
+n_total = len(images_raw)
 n_left  = int((labels_all == 0).sum())
 n_right = int((labels_all == 1).sum())
+print(f"   Total  : {n_total}  |  Izquierda: {n_left}  |  Derecha: {n_right}")
 
-print(f"Dataset cargado:")
-print(f"   Total  : {n_total} imágenes")
-print(f"   Clase 0 (izquierda) : {n_left}")
-print(f"   Clase 1 (derecha)   : {n_right}")
-print(f"   Balance : {'Balanceado' if abs(n_left-n_right) <= 0.1*n_total else 'Desbalanceado'}")
 
-def show_samples(images, labels, n_per_class=6, title='Muestras del dataset'):
-    cols = n_per_class
-    fig, axes = plt.subplots(2, cols, figsize=(cols * 1.8, 4.2))
-    stitle(fig, title, f'Clase 0 = Izquierda  |  Clase 1 = Derecha')
+# ══════════════════════════════════════════════════════════════
+# 2. PREPROCESAMIENTO ROBUSTO — MEJORA 1
+#    Otsu separa la flecha del fondo sin importar el color
+#    ni el contraste de cada imagen.
+# ══════════════════════════════════════════════════════════════
+def preprocess_otsu(img: np.ndarray) -> np.ndarray:
+    """
+    Pipeline de preprocesamiento robusto:
+      1. Ecualización de histograma  → contraste uniforme
+      2. Umbralización Otsu          → binariza automáticamente
+      3. Normalización de polaridad  → flecha siempre oscura (1.0)
+      4. Limpieza morfológica        → elimina ruido pequeño
 
-    class_names = {0: 'Izquierda ←', 1: 'Derecha →'}
-    colors_cls  = {0: BLUE, 1: ORANGE}
+    Devuelve imagen float32 ∈ [0, 1] con la flecha en blanco
+    sobre fondo negro.
+    """
+    # 1. Ecualización adaptativa para igualar imágenes de distintos contrastes
+    img_eq = exposure.equalize_adapthist(img, clip_limit=0.03)
 
-    for row, cls in enumerate([0, 1]):
-        idx = np.where(labels == cls)[0]
-        sample_idx = np.random.choice(idx, size=min(cols, len(idx)), replace=False)
-        for col, i in enumerate(sample_idx):
-            ax = axes[row, col]
-            ax.imshow(images[i], cmap='gray', vmin=0, vmax=1)
-            ax.axis('off')
-            if col == 0:
-                ax.set_ylabel(class_names[cls], color=colors_cls[cls],
-                              fontsize=9, fontweight='bold')
-        for col in range(len(sample_idx), cols):
-            axes[row, col].axis('off')
+    # 2. Umbral de Otsu: encuentra automáticamente el mejor corte
+    thresh = threshold_otsu(img_eq)
+    binary = (img_eq > thresh).astype(np.float32)
+
+    # 3. Normalización de polaridad
+    #    Si la flecha es oscura en el original → es 0 tras Otsu → invertir
+    if binary.mean() > 0.5:          # mayoría de píxeles son 1 → fondo blanco
+        binary = 1.0 - binary        # invertir para que flecha=1, fondo=0
+
+    # 4. Limpieza: eliminar manchas pequeñas (ruido de compresión, etc.)
+    bool_mask = binary.astype(bool)
+    cleaned   = morphology.remove_small_objects(bool_mask, min_size=20)
+    cleaned   = morphology.remove_small_holes(cleaned, area_threshold=50)
+
+    return cleaned.astype(np.float32)
+
+
+print("  Aplicando preprocesamiento Otsu...")
+images_proc = np.array([preprocess_otsu(img) for img in images_raw])
+print("      Listo.")
+
+
+# ── Figura comparativa: raw vs Otsu ──────────────────────────
+def show_otsu_comparison(raw, proc, labels, n=4):
+    idx_L = np.where(labels == 0)[0][:n//2]
+    idx_R = np.where(labels == 1)[0][:n//2]
+    idx   = list(idx_L) + list(idx_R)
+    cls_c = {0: BLUE, 1: ORANGE}
+    cls_t = {0: '← Izq', 1: 'Der →'}
+
+    fig, axes = plt.subplots(3, n, figsize=(n*2.2, 6.5))
+    stitle(fig, 'Preprocesamiento: Otsu + limpieza morfológica',
+           'Fila 1: original | Fila 2: Otsu binarizado | Fila 3: HOG visual')
+
+    for col, i in enumerate(idx):
+        c = labels[i]
+        # Original
+        axes[0, col].imshow(raw[col], cmap='gray', vmin=0, vmax=1)
+        axes[0, col].set_title(cls_t[c], color=cls_c[c], fontsize=9)
+        # Otsu
+        axes[1, col].imshow(proc[col], cmap='gray', vmin=0, vmax=1)
+        # HOG visualización
+        _, hog_img = hog(proc[col], **HOG_PARAMS)
+        hog_img_eq = exposure.rescale_intensity(hog_img, in_range=(0, 0.1))
+        axes[2, col].imshow(hog_img_eq, cmap='magma', vmin=0, vmax=1)
+
+    for row, label in enumerate(['Original', 'Binarizado\n(Otsu)', 'HOG visual']):
+        axes[row, 0].set_ylabel(label, fontsize=8, color=DARK)
+    for ax in axes.ravel():
+        ax.set_xticks([]); ax.set_yticks([])
 
     plt.tight_layout()
-    plt.savefig('fig1_muestras.png', bbox_inches='tight', dpi=150)
+    plt.savefig('fig_preprocesamiento_otsu.png', bbox_inches='tight', dpi=150)
     plt.show()
-    print(" Guardado: fig1_muestras.png")
+    print("    fig_preprocesamiento_otsu.png")
 
-show_samples(images_all, labels_all)
+show_otsu_comparison(images_raw, images_proc, labels_all)
 
-def normalize_polarity(images: np.ndarray) -> np.ndarray:
+
+# ══════════════════════════════════════════════════════════════
+# 3. EXTRACCIÓN DE FEATURES — MEJORA 2
+#    HOG captura la orientación de los bordes de la flecha.
+#    La punta de una flecha → tiene bordes diagonales únicos
+#    que apuntan izq o der. HOG los cuantifica directamente.
+# ══════════════════════════════════════════════════════════════
+def extract_hog_features(img: np.ndarray) -> np.ndarray:
     """
-    Si la imagen tiene fondo oscuro (media < 0.5), la invierte.
-    Garantiza que el fondo sea siempre claro.
+    Histograma de Gradientes Orientados (HOG).
+    Con IMG_SIZE=64 y pixels_per_cell=8:
+      - 8×8 celdas → 4 bloques × 9 orientaciones × 4 = 1296 features
+    Añadimos features manuales de asimetría izq/der como complemento.
     """
-    out = []
+    features_hog, _ = hog(img, **HOG_PARAMS)
+    return features_hog
+
+
+def extract_asymmetry_features(img: np.ndarray) -> np.ndarray:
+    """
+    Features manuales de asimetría horizontal (mismos que v1).
+    Complementan al HOG cuando la flecha es muy simple.
+    """
+    dark     = img.copy()                    # ya es binario: flecha=1, fondo=0
+    col_proj = dark.mean(axis=0)
+    row_proj = dark.mean(axis=1)
+    half     = IMG_SIZE // 2
+
+    mass_L   = dark[:, :half].mean()
+    mass_R   = dark[:, half:].mean()
+    lr_diff  = mass_L - mass_R
+    lr_ratio = mass_L / (mass_R + 1e-9)
+
+    cols  = np.arange(IMG_SIZE, dtype=float)
+    total = dark.sum() + 1e-9
+    cx    = (dark.sum(axis=0) @ cols) / total / IMG_SIZE
+
+    proj_asym = col_proj[:half].mean() - col_proj[half:].mean()
+    grad_asym = (np.gradient(col_proj)[:half].mean() -
+                 np.gradient(col_proj)[half:].mean())
+
+    # Cuadrantes (división en 4 zonas)
+    tl = dark[:half, :half].mean()
+    tr = dark[:half, half:].mean()
+    bl = dark[half:, :half].mean()
+    br = dark[half:, half:].mean()
+    quad_asym = (tl + bl) - (tr + br)    # >0 → más masa izquierda
+
+    return np.array([lr_diff, lr_ratio, cx, proj_asym,
+                     grad_asym, quad_asym, tl, tr, bl, br],
+                    dtype=np.float32)
+
+
+def extract_features_v2(images: np.ndarray) -> np.ndarray:
+    """
+    Combina HOG + features de asimetría manual.
+    HOG aporta detalle de orientación local.
+    Asimetría aporta información global izq/der.
+    """
+    feats = []
     for img in images:
-        out.append(1.0 - img if img.mean() < 0.5 else img.copy())
-    return np.array(out, dtype=np.float32)
+        hog_f   = extract_hog_features(img)
+        asym_f  = extract_asymmetry_features(img)
+        feats.append(np.concatenate([hog_f, asym_f]))
+    return np.array(feats, dtype=np.float32)
 
 
-def show_preprocessing(images, labels):
-    """Visualiza el efecto del preprocesamiento."""
-    fig, axes = plt.subplots(2, 4, figsize=(11, 4.5))
-    stitle(fig, 'Etapa de Preprocesamiento',
-           'Original (escala de grises) → Normalización de polaridad')
-    
-    idx_L = np.where(labels == 0)[0][:2]
-    idx_R = np.where(labels == 1)[0][:2]
-    idx_show = list(idx_L) + list(idx_R)
-    cls_labels = ['Izquierda','Izquierda','Derecha','Derecha']
-    colors = [BLUE, BLUE, ORANGE, ORANGE]
-    
-    imgs_norm = normalize_polarity(images)
-    
-    for col, (i, cls_name, c) in enumerate(zip(idx_show, cls_labels, colors)):
-        ax_orig = axes[0, col]
-        ax_norm = axes[1, col]
-        ax_orig.imshow(images[i],    cmap='gray', vmin=0, vmax=1)
-        ax_norm.imshow(imgs_norm[i], cmap='gray', vmin=0, vmax=1)
-        ax_orig.set_title(f'{cls_name}', color=c, fontsize=9)
-        for ax in [ax_orig, ax_norm]: ax.axis('off')
-    
-    axes[0, 0].set_ylabel('Original',    fontsize=9, color=DARK)
-    axes[1, 0].set_ylabel('Normalizado', fontsize=9, color=DARK)
-    
-    plt.tight_layout()
-    plt.savefig('fig2_preprocesamiento.png', bbox_inches='tight', dpi=150)
-    plt.show()
-    print("💾 Guardado: fig2_preprocesamiento.png")
-
-show_preprocessing(images_all, labels_all)
-
-# Aplicar preprocesamiento al dataset completo
-images_proc = normalize_polarity(images_all)
-print("Preprocesamiento aplicado.")
-
-def extract_features(images: np.ndarray, method: str = 'combined') -> np.ndarray:
-    """
-    Extrae vector de características por imagen.
-    
-    La proyección por columnas captura directamente la asimetría izq/der:
-    - Flecha →: más masa oscura en columnas de la derecha
-    - Flecha ←: más masa oscura en columnas de la izquierda
-    
-    Flechas oscuras sobre fondo claro → invertimos para que alta señal = flecha.
-    """
-    features = []
-    for img in images:
-        dark = 1.0 - img           # inversión: píxeles de flecha → valores altos
-
-        # Perfiles de proyección
-        col_proj = dark.mean(axis=0)    # (IMG_SIZE,) — promedio por columna
-        row_proj = dark.mean(axis=1)    # (IMG_SIZE,) — promedio por fila
-
-        # Ratio izquierda vs derecha
-        half      = IMG_SIZE // 2
-        mass_L    = dark[:, :half].mean()
-        mass_R    = dark[:, half:].mean()
-        lr_diff   = mass_L - mass_R     # >0 → más masa izq → flecha izq (clase 0)
-        lr_ratio  = mass_L / (mass_R + 1e-9)
-
-        # Centroide horizontal normalizado [0,1]
-        cols  = np.arange(IMG_SIZE, dtype=float)
-        total = dark.sum() + 1e-9
-        cx    = (dark.sum(axis=0) @ cols) / total / IMG_SIZE
-
-        # Asimetría del perfil de columnas
-        left_proj  = col_proj[:half].mean()
-        right_proj = col_proj[half:].mean()
-        proj_asym  = left_proj - right_proj
-
-        # Gradiente horizontal (detecta dónde están los bordes de la punta)
-        grad = np.gradient(col_proj)
-        grad_asym = grad[:half].mean() - grad[half:].mean()
-
-        if method == 'raw':
-            feat = dark.ravel()
-        elif method == 'projection':
-            feat = np.concatenate([col_proj, row_proj])
-        else:  # combined
-            feat = np.concatenate([
-                col_proj, row_proj,
-                [lr_diff, lr_ratio, cx, proj_asym, grad_asym]
-            ])
-        features.append(feat)
-    
-    return np.array(features, dtype=np.float32)
-
-
-def show_feature_intuition(images, labels):
-    """Visualiza la proyección por columnas de ejemplos izq vs der."""
-    fig, axes = plt.subplots(2, 4, figsize=(12, 5.5))
-    stitle(fig, 'Intuición de las Características',
-           'Proyección por columnas — la asimetría horizontal distingue izq de der')
-    
-    idx_L = np.where(labels == 0)[0][:2]
-    idx_R = np.where(labels == 1)[0][:2]
-    pairs = [(idx_L[0], 'Izquierda ←', BLUE, 0),
-             (idx_L[1], 'Izquierda ←', BLUE, 1),
-             (idx_R[0], 'Derecha →',   ORANGE, 2),
-             (idx_R[1], 'Derecha →',   ORANGE, 3)]
-    
-    imgs_n = normalize_polarity(images)
-    
-    for i_img, label, color, col in pairs:
-        img  = imgs_n[i_img]
-        dark = 1.0 - img
-        col_proj = dark.mean(axis=0)
-        half = IMG_SIZE // 2
-        mass_L = dark[:, :half].mean()
-        mass_R = dark[:, half:].mean()
-        
-        ax_img  = axes[0, col]
-        ax_proj = axes[1, col]
-        
-        ax_img.imshow(img, cmap='gray', vmin=0, vmax=1)
-        ax_img.axvline(half, color='red', lw=1, ls='--', alpha=0.7)
-        ax_img.set_title(label, color=color, fontsize=9, fontweight='bold')
-        ax_img.axis('off')
-        
-        xs = np.arange(IMG_SIZE)
-        ax_proj.bar(xs[:half], col_proj[:half], color=BLUE,   alpha=0.7,
-                    label=f'Izq: {mass_L:.3f}', width=1.0)
-        ax_proj.bar(xs[half:], col_proj[half:], color=ORANGE, alpha=0.7,
-                    label=f'Der: {mass_R:.3f}', width=1.0)
-        ax_proj.axvline(half, color='red', lw=1, ls='--', alpha=0.7)
-        ax_proj.legend(fontsize=7, loc='upper center')
-        ax_proj.set_xlabel('Columna (px)', fontsize=7)
-        if col == 0: ax_proj.set_ylabel('Masa oscura', fontsize=7)
-    
-    axes[0, 0].set_ylabel('Imagen', fontsize=8, color=DARK, labelpad=4)
-    axes[1, 0].set_ylabel('Proyección', fontsize=8, color=DARK, labelpad=4)
-    
-    plt.tight_layout()
-    plt.savefig('fig3_features.png', bbox_inches='tight', dpi=150)
-    plt.show()
-    print("Guardado: fig3_features.png")
-
-show_feature_intuition(images_proc, labels_all)
-
-# ── Extracción de características ────────────────────────────
-METHOD = 'combined'   # 'raw' | 'projection' | 'combined'
-X = extract_features(images_proc, method=METHOD)
+print("\n Extrayendo features HOG + asimetría...")
+X = extract_features_v2(images_proc)
 y = labels_all.copy()
+print(f"   Vector x: {X.shape[1]}-D por imagen")
+print(f"   ({hog(images_proc[0], **HOG_PARAMS)[0].shape[0]} HOG + 10 asimetría)")
 
-print(f"Vector de características: {X.shape[1]}-D por imagen (método='{METHOD}')")
 
-# ── División entrenamiento / prueba ──────────────────────────
+# ── Visualización: importancia de orientaciones HOG ──────────
+def show_hog_orientation(images, labels):
+    """Muestra cómo el HOG responde diferente a izq vs der."""
+    idx_L = np.where(labels == 0)[0][0]
+    idx_R = np.where(labels == 1)[0][0]
+
+    fig, axes = plt.subplots(2, 3, figsize=(10, 5.5))
+    stitle(fig, 'HOG: orientaciones de gradiente por clase',
+           'La punta de la flecha genera un patrón HOG espejado entre izq y der')
+
+    for row, (i, tag, color) in enumerate([
+            (idx_L, '← Izquierda', BLUE),
+            (idx_R, 'Derecha →',   ORANGE)]):
+        img = images[i]
+        feat, hog_img = hog(img, **HOG_PARAMS)
+        hog_eq = exposure.rescale_intensity(hog_img, in_range=(0, 0.08))
+
+        axes[row, 0].imshow(images_raw[i], cmap='gray', vmin=0, vmax=1)
+        axes[row, 0].set_title(f'Original — {tag}', color=color, fontsize=9)
+
+        axes[row, 1].imshow(img, cmap='gray', vmin=0, vmax=1)
+        axes[row, 1].set_title('Binarizado (Otsu)', color=DARK, fontsize=9)
+
+        axes[row, 2].imshow(hog_eq, cmap='magma')
+        axes[row, 2].set_title('HOG — orientaciones', color=DARK, fontsize=9)
+
+    for ax in axes.ravel():
+        ax.set_xticks([]); ax.set_yticks([])
+
+    plt.tight_layout()
+    plt.savefig('fig_hog_orientaciones.png', bbox_inches='tight', dpi=150)
+    plt.show()
+    print("    fig_hog_orientaciones.png")
+
+show_hog_orientation(images_proc, labels_all)
+
+
+# ══════════════════════════════════════════════════════════════
+# 4. ENTRENAMIENTO CON GRIDSEARCHCV — MEJORA 3
+# ══════════════════════════════════════════════════════════════
 X_tr, X_te, y_tr, y_te, idx_tr, idx_te = train_test_split(
     X, y, np.arange(len(y)),
     test_size=0.2, random_state=42, stratify=y)
 
-print(f"\nDivisión entrenamiento/prueba:")
-print(f"  Entrenamiento: {len(X_tr)} muestras  "
-      f"(L={int((y_tr==0).sum())}, R={int((y_tr==1).sum())})")
-print(f"  Prueba       : {len(X_te)} muestras  "
-      f"(L={int((y_te==0).sum())}, R={int((y_te==1).sum())})")
+print(f"\n División: {len(X_tr)} entrenamiento / {len(X_te)} prueba")
 
-# ── Escalado ─────────────────────────────────────────────────
-scaler   = StandardScaler()
-X_tr_s   = scaler.fit_transform(X_tr)
-X_te_s   = scaler.transform(X_te)
+# Pipeline: escalado → regresión logística
+pipe = Pipeline([
+    ('scaler', StandardScaler()),
+    ('clf',    LogisticRegression(max_iter=2000, random_state=42,
+                                  class_weight='balanced')),
+])
 
-# ── Validación cruzada (5-fold) ──────────────────────────────
-clf    = LogisticRegression(C=1.0, max_iter=1000, solver='lbfgs', random_state=42)
-skf    = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-cv_acc = cross_val_score(clf, X_tr_s, y_tr, cv=skf, scoring='accuracy')
+# Grilla de hiperparámetros
+#   C controla la regularización: C pequeño → más regularización → más robusto
+#   solver: lbfgs funciona bien para datos densos (HOG)
+param_grid = {
+    'clf__C'      : [0.001, 0.01, 0.1, 1, 10, 100],
+    'clf__solver' : ['lbfgs', 'liblinear'],
+}
 
-print(f"\nValidación cruzada (5-fold):")
-print(f"  Accuracy por fold: {np.round(cv_acc, 3)}")
-print(f"  Media: {cv_acc.mean():.3f}  ±  {cv_acc.std():.3f}")
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
-# ── Entrenamiento final ───────────────────────────────────────
-clf.fit(X_tr_s, y_tr)
-y_pred  = clf.predict(X_te_s)
-y_proba = clf.predict_proba(X_te_s)[:, 1]
-print("\nModelo entrenado.")
+print("\n Ejecutando GridSearchCV (esto puede tardar 30-60 s)...")
+gs = GridSearchCV(pipe, param_grid, cv=skf,
+                  scoring='f1', n_jobs=-1, verbose=0)
+gs.fit(X_tr, y_tr)
 
-# ── Métricas ─────────────────────────────────────────────────
-acc  = accuracy_score(y_te, y_pred)
-prec = precision_score(y_te, y_pred, zero_division=0)
-rec  = recall_score(y_te, y_pred,    zero_division=0)
-f1   = f1_score(y_te, y_pred,        zero_division=0)
-cm   = confusion_matrix(y_te, y_pred)
+best_C      = gs.best_params_['clf__C']
+best_solver = gs.best_params_['clf__solver']
+best_cv_f1  = gs.best_score_
+print(f"   Mejor C      : {best_C}")
+print(f"   Mejor solver : {best_solver}")
+print(f"   Mejor CV F1  : {best_cv_f1:.4f}")
+
+# Modelo final con los mejores parámetros
+best_pipe = gs.best_estimator_
+
+# También guardar el scaler y clf por separado para predecir luego
+scaler_final = best_pipe.named_steps['scaler']
+clf_final    = best_pipe.named_steps['clf']
+
+# Predicciones
+y_pred  = best_pipe.predict(X_te)
+y_proba = best_pipe.predict_proba(X_te)[:, 1]
+
+acc     = accuracy_score(y_te, y_pred)
+prec    = precision_score(y_te, y_pred, zero_division=0)
+rec     = recall_score(y_te, y_pred,    zero_division=0)
+f1      = f1_score(y_te, y_pred,        zero_division=0)
+cm      = confusion_matrix(y_te, y_pred)
 fpr, tpr, _ = roc_curve(y_te, y_proba)
 roc_auc     = auc(fpr, tpr)
+tn, fp, fn, tp = cm.ravel()
 
-print("Métricas en test:")
+print(f"\n Resultados en test:")
 print(f"   Accuracy  : {acc :.4f}")
 print(f"   Precision : {prec:.4f}")
 print(f"   Recall    : {rec :.4f}")
 print(f"   F1-score  : {f1  :.4f}")
 print(f"   ROC AUC   : {roc_auc:.4f}")
 
-# ── Figura de evaluación ─────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════
+# 5. VISUALIZACIÓN COMPLETA
+# ══════════════════════════════════════════════════════════════
+
+# ── Figura 1: GridSearch — mapa de calor C vs solver ─────────
+def show_gridsearch(gs, param_grid):
+    results = gs.cv_results_
+    Cs      = param_grid['clf__C']
+    solvers = param_grid['clf__solver']
+
+    scores = np.zeros((len(solvers), len(Cs)))
+    for i, sol in enumerate(solvers):
+        for j, c in enumerate(Cs):
+            mask = ((np.array(results['param_clf__C']) == c) &
+                    (np.array(results['param_clf__solver']) == sol))
+            scores[i, j] = results['mean_test_score'][mask][0]
+
+    fig, ax = plt.subplots(figsize=(8, 3.5))
+    stitle(fig, 'GridSearchCV — F1 por hiperparámetros',
+           f'Mejor C={best_C}, solver={best_solver}, CV F1={best_cv_f1:.3f}')
+    im = ax.imshow(scores, cmap='YlOrRd', vmin=scores.min()-0.01,
+                   vmax=min(scores.max()+0.01, 1.0), aspect='auto')
+    ax.set_xticks(range(len(Cs)));      ax.set_xticklabels([str(c) for c in Cs])
+    ax.set_yticks(range(len(solvers))); ax.set_yticklabels(solvers)
+    ax.set_xlabel('C (regularización)')
+    ax.set_ylabel('Solver')
+    plt.colorbar(im, ax=ax, label='CV F1')
+    for i in range(len(solvers)):
+        for j in range(len(Cs)):
+            ax.text(j, i, f'{scores[i,j]:.3f}', ha='center', va='center',
+                    fontsize=8, color='black' if scores[i,j] < 0.85 else 'white')
+    # Marcar el mejor
+    bi = solvers.index(best_solver)
+    bj = Cs.index(best_C)
+    ax.add_patch(plt.Rectangle((bj-0.5, bi-0.5), 1, 1,
+                                fill=False, edgecolor='blue', lw=2.5))
+    plt.tight_layout()
+    plt.savefig('fig_gridsearch.png', bbox_inches='tight', dpi=150)
+    plt.show()
+    print("    fig_gridsearch.png")
+
+show_gridsearch(gs, param_grid)
+
+
+# ── Figura 2: Evaluación completa ────────────────────────────
 fig = plt.figure(figsize=(14, 9))
-stitle(fig, 'Evaluación del Clasificador',
-       f'Regresión Logística — método: {METHOD} — {n_total} imágenes')
+stitle(fig, 'Evaluación del Clasificador v2 — Otsu + HOG + GridSearch',
+       f'C={best_C}  solver={best_solver}  |  {n_total} imágenes')
+gs_grid = gridspec.GridSpec(2, 3, figure=fig, hspace=0.45, wspace=0.38)
 
-gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.45, wspace=0.38)
-
-# ── (a) Matriz de confusión ──────────────────────────────────
-ax_cm = fig.add_subplot(gs[0, 0])
-disp = ConfusionMatrixDisplay(cm, display_labels=['Izquierda ←', 'Derecha →'])
-disp.plot(ax=ax_cm, colorbar=False,
-          cmap=plt.cm.Blues if True else None)
+# (a) Matriz de confusión
+ax_cm = fig.add_subplot(gs_grid[0, 0])
+ConfusionMatrixDisplay(cm, display_labels=['← Izquierda', 'Derecha →']).plot(
+    ax=ax_cm, colorbar=False, cmap=plt.cm.Blues)
 ax_cm.set_title('Matriz de Confusión')
-ax_cm.set_xlabel('Predicción', fontsize=9)
-ax_cm.set_ylabel('Etiqueta real', fontsize=9)
-tn, fp, fn, tp = cm.ravel()
 ax_cm.text(0.5, -0.22, f'TN={tn}  FP={fp}  FN={fn}  TP={tp}',
            transform=ax_cm.transAxes, ha='center', fontsize=8, color=GRAY)
 
-# ── (b) Curva ROC ─────────────────────────────────────────────
-ax_roc = fig.add_subplot(gs[0, 1])
+# (b) Curva ROC
+ax_roc = fig.add_subplot(gs_grid[0, 1])
 ax_roc.plot(fpr, tpr, color=BLUE, lw=2, label=f'AUC = {roc_auc:.3f}')
 ax_roc.plot([0,1], [0,1], 'k--', lw=1, alpha=0.4, label='Azar')
-ax_roc.fill_between(fpr, tpr, alpha=0.07, color=BLUE)
-ax_roc.set_xlabel('Tasa de Falsos Positivos')
-ax_roc.set_ylabel('Tasa de Verdaderos Positivos')
+ax_roc.fill_between(fpr, tpr, alpha=0.08, color=BLUE)
+ax_roc.set_xlabel('Tasa Falsos Positivos')
+ax_roc.set_ylabel('Tasa Verdaderos Positivos')
 ax_roc.set_title('Curva ROC')
-ax_roc.legend(fontsize=8)
-ax_roc.set_xlim([0, 1]); ax_roc.set_ylim([0, 1.02])
+ax_roc.legend(fontsize=8); ax_roc.set_xlim(0,1); ax_roc.set_ylim(0,1.02)
 
-# ── (c) Métricas en barras ────────────────────────────────────
-ax_met = fig.add_subplot(gs[0, 2])
-metricas  = ['Accuracy', 'Precision', 'Recall', 'F1-score', 'ROC AUC']
-valores   = [acc, prec, rec, f1, roc_auc]
-colores   = [BLUE, ORANGE, GREEN, PURPLE, RED]
+# (c) Métricas en barras
+ax_met = fig.add_subplot(gs_grid[0, 2])
+metricas = ['Accuracy', 'Precision', 'Recall', 'F1-score', 'ROC AUC']
+valores  = [acc, prec, rec, f1, roc_auc]
+colores  = [BLUE, ORANGE, GREEN, PURPLE, RED]
 bars = ax_met.barh(metricas, valores, color=colores, alpha=0.82, height=0.55)
 for bar, val in zip(bars, valores):
-    ax_met.text(val + 0.01, bar.get_y() + bar.get_height()/2,
+    ax_met.text(val+0.01, bar.get_y()+bar.get_height()/2,
                 f'{val:.3f}', va='center', fontsize=8, fontweight='bold')
-ax_met.set_xlim(0, 1.15)
-ax_met.set_xlabel('Valor')
-ax_met.set_title('Resumen de Métricas')
+ax_met.set_xlim(0, 1.18); ax_met.set_title('Resumen de Métricas')
 ax_met.axvline(0.5, color='gray', lw=0.8, ls='--', alpha=0.5)
 
-# ── (d) Validación cruzada ───────────────────────────────────
-ax_cv = fig.add_subplot(gs[1, 0])
-folds = [f'Fold {i+1}' for i in range(len(cv_acc))]
-bar_cv = ax_cv.bar(folds, cv_acc, color=BLUE, alpha=0.75, width=0.5)
-ax_cv.axhline(cv_acc.mean(), color=ORANGE, lw=2, ls='--',
-              label=f'Media = {cv_acc.mean():.3f}')
-ax_cv.fill_between([-0.5, len(cv_acc)-0.5],
-                   cv_acc.mean()-cv_acc.std(),
-                   cv_acc.mean()+cv_acc.std(),
-                   color=ORANGE, alpha=0.12, label=f'±1 std = {cv_acc.std():.3f}')
-for bar, val in zip(bar_cv, cv_acc):
-    ax_cv.text(bar.get_x()+bar.get_width()/2, val+0.005,
-               f'{val:.3f}', ha='center', fontsize=8)
-ax_cv.set_ylim(0, 1.15)
-ax_cv.set_ylabel('Accuracy')
-ax_cv.set_title('Validación Cruzada (5-fold)')
-ax_cv.legend(fontsize=7)
+# (d) PCA del espacio HOG
+ax_pca = fig.add_subplot(gs_grid[1, 0])
+X_sc   = scaler_final.transform(X)
+pca    = PCA(n_components=2, random_state=42)
+X_2d   = pca.fit_transform(X_sc)
+ax_pca.scatter(X_2d[y==0, 0], X_2d[y==0, 1], c=BLUE,   alpha=0.5, s=18,
+               label='Izquierda ←', edgecolors='none')
+ax_pca.scatter(X_2d[y==1, 0], X_2d[y==1, 1], c=ORANGE, alpha=0.5, s=18,
+               label='Derecha →',   edgecolors='none')
+ax_pca.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]*100:.1f}%)')
+ax_pca.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)')
+ax_pca.set_title('Espacio HOG (PCA 2D)')
+ax_pca.legend(fontsize=8)
 
-# ── (e) Distribución de probabilidades ──────────────────────
-ax_prob = fig.add_subplot(gs[1, 1])
-prob_L = y_proba[y_te == 0]
-prob_R = y_proba[y_te == 1]
-bins = np.linspace(0, 1, 20)
-ax_prob.hist(prob_L, bins=bins, color=BLUE,   alpha=0.65, label='Izquierda (real)', density=True)
-ax_prob.hist(prob_R, bins=bins, color=ORANGE, alpha=0.65, label='Derecha (real)',   density=True)
-ax_prob.axvline(0.5, color='red', lw=1.5, ls='--', label='Umbral 0.5')
+# (e) Distribución de probabilidades
+ax_prob = fig.add_subplot(gs_grid[1, 1])
+bins = np.linspace(0, 1, 22)
+ax_prob.hist(y_proba[y_te==0], bins=bins, color=BLUE,   alpha=0.65,
+             density=True, label='Izquierda (real)')
+ax_prob.hist(y_proba[y_te==1], bins=bins, color=ORANGE, alpha=0.65,
+             density=True, label='Derecha (real)')
+ax_prob.axvline(0.5, color=RED, lw=1.5, ls='--', label='Umbral 0.5')
 ax_prob.set_xlabel('P(Derecha | x)')
 ax_prob.set_ylabel('Densidad')
 ax_prob.set_title('Distribución de Probabilidades')
 ax_prob.legend(fontsize=7)
 
-# ── (f) Errores de clasificación ────────────────────────────
-ax_err = fig.add_subplot(gs[1, 2])
+# (f) Errores
+ax_err = fig.add_subplot(gs_grid[1, 2])
 err_mask = y_pred != y_te
-n_err = err_mask.sum()
+n_err    = err_mask.sum()
 ax_err.set_facecolor('#FFF5F5')
 if n_err > 0:
-    err_imgs  = images_proc[idx_te[err_mask]]
-    err_preds = y_pred[err_mask]
-    err_reals = y_te[err_mask]
-    n_show    = min(n_err, 8)
-    for k in range(n_show):
+    n_show_err = min(n_err, 8)
+    err_imgs   = images_proc[idx_te[err_mask]][:n_show_err]
+    err_preds  = y_pred[err_mask][:n_show_err]
+    err_reals  = y_te[err_mask][:n_show_err]
+    for k in range(n_show_err):
         xi = (k % 4) / 4
-        yi = 1 - (k // 4 + 1) * 0.45
+        yi = 1 - (k // 4 + 1) * 0.47
         ax_err.imshow(err_imgs[k], cmap='gray', vmin=0, vmax=1,
-                      extent=[xi, xi+0.23, yi, yi+0.38], aspect='auto')
-        cls_r = '←' if err_reals[k]==0 else '→'
-        cls_p = '←' if err_preds[k]==0 else '→'
-        ax_err.text(xi+0.115, yi-0.04,
-                    f'Real:{cls_r} Pred:{cls_p}',
+                      extent=[xi, xi+0.23, yi, yi+0.4], aspect='auto')
+        r = '←' if err_reals[k]==0 else '→'
+        p = '←' if err_preds[k]==0 else '→'
+        ax_err.text(xi+0.115, yi-0.05, f'Real:{r} Pred:{p}',
                     ha='center', fontsize=6, color=RED)
-    ax_err.set_xlim(0, 1); ax_err.set_ylim(0, 1)
+    ax_err.set_xlim(0,1); ax_err.set_ylim(0,1)
     ax_err.set_title(f'Errores de clasificación ({n_err})')
 else:
-    ax_err.text(0.5, 0.5, '¡Sin errores! 🎉',
-                ha='center', va='center', fontsize=13, color=GREEN, fontweight='bold')
+    ax_err.text(0.5, 0.5, '¡Sin errores! ',
+                ha='center', va='center', fontsize=14, color=GREEN, fontweight='bold')
     ax_err.set_title('Errores de clasificación (0)')
 ax_err.axis('off')
 
-plt.savefig('fig4_evaluacion.png', bbox_inches='tight', dpi=150)
+plt.savefig('fig_evaluacion_v2.png', bbox_inches='tight', dpi=150)
 plt.show()
-print("Guardado: fig4_evaluacion.png")
+print("    fig_evaluacion_v2.png")
 
-# ── Comparación de métodos ───────────────────────────────────
-print("Comparando métodos de características...")
-results = {}
-for method in ['raw', 'projection', 'combined']:
-    Xm     = extract_features(images_proc, method=method)
-    Xm_tr, Xm_te, ym_tr, ym_te = train_test_split(
-        Xm, y, test_size=0.2, random_state=42, stratify=y)
-    sc     = StandardScaler()
-    Xm_tr_s = sc.fit_transform(Xm_tr)
-    Xm_te_s = sc.transform(Xm_te)
-    m      = LogisticRegression(C=1.0, max_iter=1000, random_state=42)
-    cv_a   = cross_val_score(m, Xm_tr_s, ym_tr, cv=5, scoring='accuracy')
-    m.fit(Xm_tr_s, ym_tr)
-    yp     = m.predict(Xm_te_s)
-    results[method] = {
-        'dim'     : Xm.shape[1],
-        'cv_mean' : cv_acc.mean() if method == METHOD else cv_a.mean(),
-        'cv_std'  : cv_acc.std()  if method == METHOD else cv_a.std(),
-        'acc_test': accuracy_score(ym_te, yp),
-        'f1_test' : f1_score(ym_te, yp, zero_division=0),
-    }
-    print(f"  {method:12s} | dim={Xm.shape[1]:5d} | CV={cv_a.mean():.3f}±{cv_a.std():.3f} | test_acc={accuracy_score(ym_te,yp):.3f}")
 
-# ── Figura de generalización ─────────────────────────────────
-fig, axes = plt.subplots(1, 3, figsize=(14, 5))
-stitle(fig, 'Análisis de Generalización',
-       'Comparación de métodos de características y visualización PCA')
+# ── Figura 3: componentes HOG más importantes ────────────────
+def show_top_hog_weights(clf, n_top=20):
+    """
+    Visualiza los pesos más grandes del modelo para entender
+    qué orientaciones HOG son más discriminativas.
+    """
+    w         = clf.coef_[0]
+    n_hog     = X.shape[1] - 10          # últimos 10 son asimetría manual
+    w_hog     = w[:n_hog]
+    w_asym    = w[n_hog:]
+    asym_names = ['lr_diff','lr_ratio','cx','proj_asym',
+                  'grad_asym','quad_asym','tl','tr','bl','br']
 
-# ── (a) Comparación accuracy CV vs test ──────────────────────
-ax = axes[0]
-method_names = list(results.keys())
-cv_means  = [results[m]['cv_mean'] for m in method_names]
-cv_stds   = [results[m]['cv_std']  for m in method_names]
-test_accs = [results[m]['acc_test'] for m in method_names]
-test_f1s  = [results[m]['f1_test']  for m in method_names]
-x = np.arange(len(method_names))
-w = 0.28
-ax.bar(x - w, cv_means,  width=w, color=BLUE,   alpha=0.8, label='CV Accuracy',  yerr=cv_stds, capsize=4)
-ax.bar(x,      test_accs, width=w, color=ORANGE, alpha=0.8, label='Test Accuracy')
-ax.bar(x + w,  test_f1s,  width=w, color=GREEN,  alpha=0.8, label='Test F1-score')
-ax.set_xticks(x); ax.set_xticklabels(method_names, fontsize=9)
-ax.set_ylim(0, 1.2)
-ax.set_ylabel('Valor')
-ax.set_title('Métodos de Características')
-ax.legend(fontsize=7, loc='upper right')
-ax.axhline(0.5, color='gray', lw=0.8, ls='--', alpha=0.5)
-for i in range(len(method_names)):
-    ax.text(i-w, cv_means[i]+0.04, f'{cv_means[i]:.2f}', ha='center', fontsize=7, color=BLUE)
-    ax.text(i,   test_accs[i]+0.04,f'{test_accs[i]:.2f}',ha='center', fontsize=7, color=ORANGE)
-    ax.text(i+w, test_f1s[i]+0.04, f'{test_f1s[i]:.2f}', ha='center', fontsize=7, color=GREEN)
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4))
+    stitle(fig, 'Pesos del modelo — ¿qué aprendió?',
+           'Azul = evidencia de izquierda  |  Naranja = evidencia de derecha')
 
-# ── (b) PCA 2D del espacio de características ────────────────
-ax_pca = axes[1]
-X_best = extract_features(images_proc, method='combined')
-sc2    = StandardScaler()
-X_sc2  = sc2.fit_transform(X_best)
-pca    = PCA(n_components=2, random_state=42)
-X_2d   = pca.fit_transform(X_sc2)
+    # Histograma de pesos HOG
+    ax = axes[0]
+    pos_w = np.where(w_hog > 0, w_hog, 0)
+    neg_w = np.where(w_hog < 0, w_hog, 0)
+    ax.bar(range(len(w_hog)), pos_w, color=ORANGE, alpha=0.7, width=1.0, label='→ Derecha')
+    ax.bar(range(len(w_hog)), neg_w, color=BLUE,   alpha=0.7, width=1.0, label='← Izquierda')
+    ax.axhline(0, color='black', lw=0.8)
+    ax.set_xlabel('Feature HOG (índice)')
+    ax.set_ylabel('Peso w')
+    ax.set_title('Distribución de pesos HOG')
+    ax.legend(fontsize=8)
 
-idx_L_all = np.where(y == 0)[0]
-idx_R_all = np.where(y == 1)[0]
-ax_pca.scatter(X_2d[idx_L_all, 0], X_2d[idx_L_all, 1],
-               c=BLUE, alpha=0.55, s=22, label='Izquierda ←', edgecolors='none')
-ax_pca.scatter(X_2d[idx_R_all, 0], X_2d[idx_R_all, 1],
-               c=ORANGE, alpha=0.55, s=22, label='Derecha →', edgecolors='none')
-ax_pca.set_xlabel(f'PC1 ({pca.explained_variance_ratio_[0]*100:.1f}%)')
-ax_pca.set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)')
-ax_pca.set_title('Espacio de Características (PCA)')
-ax_pca.legend(fontsize=8)
+    # Features de asimetría manual
+    ax2 = axes[1]
+    colors_w = [ORANGE if v > 0 else BLUE for v in w_asym]
+    bars = ax2.barh(asym_names, w_asym, color=colors_w, alpha=0.82, height=0.6)
+    for bar, val in zip(bars, w_asym):
+        ax2.text(val + (0.002 if val >= 0 else -0.002),
+                 bar.get_y() + bar.get_height()/2,
+                 f'{val:.3f}', va='center', ha='left' if val >= 0 else 'right',
+                 fontsize=7)
+    ax2.axvline(0, color='black', lw=0.8)
+    ax2.set_title('Pesos features de asimetría manual')
+    ax2.set_xlabel('Peso w')
 
-# ── (c) Pesos del modelo (proyección por columnas) ───────────
-ax_w = axes[2]
-# Los primeros IMG_SIZE pesos corresponden a la proyección por columnas
-w_col = clf.coef_[0][:IMG_SIZE]
-colors_w = [ORANGE if v > 0 else BLUE for v in w_col]
-ax_w.bar(np.arange(IMG_SIZE), w_col, color=colors_w, alpha=0.8, width=1.0)
-ax_w.axhline(0, color='black', lw=0.8)
-ax_w.axvline(IMG_SIZE//2, color='red', lw=1.5, ls='--', alpha=0.7, label='Centro')
-ax_w.set_xlabel('Columna (px)')
-ax_w.set_ylabel('Peso w')
-ax_w.set_title('Pesos del Modelo\n(proyección por columnas)')
-ax_w.legend(fontsize=8)
-# Anotación interpretativa
-ymax = max(abs(w_col.min()), abs(w_col.max()))
-ax_w.text(IMG_SIZE*0.15, ymax*0.85, '← Izquierda', color=BLUE, fontsize=7, ha='center')
-ax_w.text(IMG_SIZE*0.85, ymax*0.85, 'Derecha →',   color=ORANGE, fontsize=7, ha='center')
+    plt.tight_layout()
+    plt.savefig('fig_pesos_modelo.png', bbox_inches='tight', dpi=150)
+    plt.show()
+    print("    fig_pesos_modelo.png")
 
-plt.tight_layout()
-plt.savefig('fig5_generalizacion.png', bbox_inches='tight', dpi=150)
-plt.show()
-print("Guardado: fig5_generalizacion.png")
+show_top_hog_weights(clf_final)
 
-print("=" * 55)
-print("          REPORTE FINAL — ¿Izquierda o Derecha?")
-print("=" * 55)
-print(f"\n Dataset")
-print(f"   Total imágenes     : {n_total}")
-print(f"   Izquierda (clase 0): {n_left}")
-print(f"   Derecha   (clase 1): {n_right}")
-print(f"   Tamaño normalizado : {IMG_SIZE}×{IMG_SIZE} px")
 
-print(f"\n  Modelo")
-print(f"   Método de features : {METHOD}")
-print(f"   Dimensión de x     : {X.shape[1]}")
-print(f"   Regularización C   : {clf.C}")
-print(f"   Solver             : {clf.solver}")
+# ══════════════════════════════════════════════════════════════
+# 6. REPORTE FINAL
+# ══════════════════════════════════════════════════════════════
+print("\n" + "═"*55)
+print("   REPORTE FINAL — v2")
+print("═"*55)
+print(f"\n   Dataset : {n_total} imágenes  ({n_left} izq / {n_right} der)")
+print(f"   Features : HOG({hog(images_proc[0],**HOG_PARAMS)[0].shape[0]}) + asimetría(10) = {X.shape[1]}-D")
+print(f"   Modelo   : LogisticRegression  C={best_C}  solver={best_solver}")
+print(f"\n   Test Accuracy  : {acc :.4f}")
+print(f"   Test Precision : {prec:.4f}")
+print(f"   Test Recall    : {rec :.4f}")
+print(f"   Test F1-score  : {f1  :.4f}")
+print(f"   ROC AUC        : {roc_auc:.4f}")
+print(f"\n   Errores en test: {n_err} / {len(y_te)}")
+print("\n   Figuras:")
+for fname in ['fig_preprocesamiento_otsu.png', 'fig_hog_orientaciones.png',
+              'fig_gridsearch.png', 'fig_evaluacion_v2.png', 'fig_pesos_modelo.png']:
+    print(f"   • {fname}")
+print("\n" + "═"*55)
 
-print(f"\n Desempeño")
-print(f"   CV Accuracy (5-fold): {cv_acc.mean():.4f} ± {cv_acc.std():.4f}")
-print(f"   Test Accuracy       : {acc:.4f}")
-print(f"   Test Precision      : {prec:.4f}")
-print(f"   Test Recall         : {rec:.4f}")
-print(f"   Test F1-score       : {f1:.4f}")
-print(f"   ROC AUC             : {roc_auc:.4f}")
 
-print(f"\n Matriz de Confusión")
-print(f"   VP (Der predicha correcta) : {tp}")
-print(f"   VN (Izq predicha correcta) : {tn}")
-print(f"   FP (Izq predicha como Der) : {fp}")
-print(f"   FN (Der predicha como Izq) : {fn}")
-
-print(f"\n  Figuras guardadas")
-for i, fname in enumerate(['fig1_muestras.png', 'fig2_preprocesamiento.png',
-                            'fig3_features.png', 'fig4_evaluacion.png',
-                            'fig5_generalizacion.png'], 1):
-    print(f"   {i}. {fname}")
-print("\n" + "=" * 55)
-
+# ══════════════════════════════════════════════════════════════
+# 7. FUNCIÓN DE PREDICCIÓN
+# ══════════════════════════════════════════════════════════════
 def predecir(ruta_imagen: str, mostrar: bool = True) -> str:
     """
-    Predice si una imagen contiene una flecha hacia la izquierda o derecha.
-    
-    Parameters
-    ----------
-    ruta_imagen : str
-        Ruta al archivo de imagen.
-    mostrar : bool
-        Si True, muestra la imagen y el resultado.
-    
-    Returns
-    -------
-    str : 'Izquierda' o 'Derecha'
+    Predice si una flecha apunta a la izquierda o a la derecha.
+
+    Uso:
+        predecir('dataset/Left/flecha_01.png')
+        predecir('mi_foto.jpg')
     """
-    img = (Image.open(ruta_imagen)
-           .convert('L')
-           .resize((IMG_SIZE, IMG_SIZE), Image.LANCZOS))
-    arr = np.array(img, dtype=np.float32) / 255.0
-    
-    # Preprocesar
-    if arr.mean() < 0.5:
-        arr = 1.0 - arr
-    
-    # Extraer features y escalar
-    feat = extract_features(arr[np.newaxis], method=METHOD)
-    feat_s = scaler.transform(feat)
-    
-    # Predecir
-    pred  = clf.predict(feat_s)[0]
-    proba = clf.predict_proba(feat_s)[0]
-    clase = 'Derecha →' if pred == 1 else 'Izquierda ←'
-    conf  = proba[pred]
-    
+    img_pil = (Image.open(ruta_imagen)
+               .convert('L')
+               .resize((IMG_SIZE, IMG_SIZE), Image.LANCZOS))
+    img_raw = np.array(img_pil, dtype=np.float32) / 255.0
+    img_proc = preprocess_otsu(img_raw)
+
+    feat   = extract_features_v2(img_proc[np.newaxis])  # (1, D)
+    pred   = best_pipe.predict(feat)[0]
+    proba  = best_pipe.predict_proba(feat)[0]
+    clase  = 'Derecha →' if pred == 1 else 'Izquierda ←'
+    conf   = proba[pred]
+
     if mostrar:
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(6, 2.8))
-        ax1.imshow(arr, cmap='gray', vmin=0, vmax=1)
-        ax1.set_title(ruta_imagen, fontsize=7)
-        ax1.axis('off')
-        ax2.barh(['Izquierda ←', 'Derecha →'], [proba[0], proba[1]],
-                 color=[BLUE, ORANGE], alpha=0.8)
-        ax2.set_xlim(0, 1)
-        ax2.set_title(f'Predicción: {clase}\nConfianza: {conf:.2%}',
-                      color=(ORANGE if pred==1 else BLUE), fontsize=10, fontweight='bold')
-        ax2.axvline(0.5, color='red', lw=1, ls='--')
+        _, hog_vis = hog(img_proc, **HOG_PARAMS)
+        hog_eq     = exposure.rescale_intensity(hog_vis, in_range=(0, 0.08))
+
+        fig, axes = plt.subplots(1, 3, figsize=(9, 3))
+        axes[0].imshow(img_raw,  cmap='gray', vmin=0, vmax=1)
+        axes[0].set_title('Original', fontsize=9)
+        axes[1].imshow(img_proc, cmap='gray', vmin=0, vmax=1)
+        axes[1].set_title('Binarizado (Otsu)', fontsize=9)
+        axes[2].imshow(hog_eq,   cmap='magma')
+        axes[2].set_title('HOG visual', fontsize=9)
+        for ax in axes: ax.axis('off')
+
+        color = ORANGE if pred == 1 else BLUE
+        fig.suptitle(f'Predicción: {clase}   (confianza: {conf:.1%})',
+                     fontsize=12, fontweight='bold', color=color)
         plt.tight_layout()
         plt.show()
-    
-    print(f"Predicción: {clase}  (confianza: {conf:.2%})")
+
+    print(f" {clase}  (confianza: {conf:.1%})")
     return clase
 
-print("Función 'predecir()' lista.")
-print("   Uso: predecir('ruta/a/imagen.png')")
+
+print("\n Función 'predecir()' lista.")
+print("    Uso: predecir('ruta/imagen.png')\n")
