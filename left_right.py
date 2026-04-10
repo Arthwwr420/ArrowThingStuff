@@ -46,13 +46,6 @@ def stitle(fig, t, s=''):
 
 print("Librerías cargadas correctamente.")
 
-# %% [markdown]
-# ## 1. Carga del Dataset
-# Cargamos todas las imágenes de **Data-L/** (izquierda → clase 0)
-# y **Data-R/** (derecha → clase 1).
-
-# %%
-# ── Configuración de rutas ───────────────────────────────────
 IMG_SIZE    = 64       # píxeles × píxeles de normalización
 BASE_DIR = 'dataset'
 DIR_LEFT  = os.path.join(BASE_DIR, 'Left')
@@ -139,7 +132,7 @@ def show_samples(images, labels, n_per_class=6, title='Muestras del dataset'):
     plt.tight_layout()
     plt.savefig('fig1_muestras.png', bbox_inches='tight', dpi=150)
     plt.show()
-    print("💾 Guardado: fig1_muestras.png")
+    print(" Guardado: fig1_muestras.png")
 
 show_samples(images_all, labels_all)
 
@@ -332,10 +325,6 @@ y_pred  = clf.predict(X_te_s)
 y_proba = clf.predict_proba(X_te_s)[:, 1]
 print("\nModelo entrenado.")
 
-# %% [markdown]
-# ## 6. Evaluación del Modelo
-
-# %%
 # ── Métricas ─────────────────────────────────────────────────
 acc  = accuracy_score(y_te, y_pred)
 prec = precision_score(y_te, y_pred, zero_division=0)
@@ -549,7 +538,7 @@ ax_w.text(IMG_SIZE*0.85, ymax*0.85, 'Derecha →',   color=ORANGE, fontsize=7, h
 plt.tight_layout()
 plt.savefig('fig5_generalizacion.png', bbox_inches='tight', dpi=150)
 plt.show()
-print("💾 Guardado: fig5_generalizacion.png")
+print("Guardado: fig5_generalizacion.png")
 
 print("=" * 55)
 print("          REPORTE FINAL — ¿Izquierda o Derecha?")
@@ -635,7 +624,7 @@ def predecir(ruta_imagen: str, mostrar: bool = True) -> str:
         plt.tight_layout()
         plt.show()
     
-    print(f"🎯 Predicción: {clase}  (confianza: {conf:.2%})")
+    print(f"Predicción: {clase}  (confianza: {conf:.2%})")
     return clase
 
 # ── Ejemplo de uso ────────────────────────────────────────────
