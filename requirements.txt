@@ -1,2 +1,5 @@
 numpy==2.4.4
 opencv-python==4.13.0.92
+matplotlib
+scikit-learn
+pillow

@@ -627,9 +627,5 @@ def predecir(ruta_imagen: str, mostrar: bool = True) -> str:
     print(f"Predicción: {clase}  (confianza: {conf:.2%})")
     return clase
 
-# ── Ejemplo de uso ────────────────────────────────────────────
-# predecir('mi_flecha.png')
-# predecir('Data-L/flecha_001.png')
-
 print("Función 'predecir()' lista.")
 print("   Uso: predecir('ruta/a/imagen.png')")
